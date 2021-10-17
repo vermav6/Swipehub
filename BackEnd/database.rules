@@ -1,0 +1,18 @@
+{
+  "rules": {
+    "$sessionId":{
+      "sessionActivity":{
+        "users":{
+        "$userId":
+        {
+          "swipes":{
+        ".write": "auth != null && auth.token.sessionId == $sessionId && auth.token.userId == $userId"
+        }
+        }
+      },
+        ".read": "auth != null && auth.token.sessionId == $sessionId",
+        ".write": false
+      },
+  }
+}
+}
