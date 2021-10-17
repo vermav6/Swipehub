@@ -1,44 +1,51 @@
+// Setting up dependencies
 const functions = require("firebase-functions");
 const axios = require("axios");
 const admin = require("firebase-admin");
-admin.initializeApp({databaseURL: "https://theswipehub-default-rtdb.firebaseio.com/"});
+// Configuring database
+admin.initializeApp({ databaseURL: "https://theswipehub-default-rtdb.firebaseio.com/" });
+const sessionDb = admin.database();
+// Configuring credentials
 const apiToken = functions.config().tmdb.key;
 const TelegramURL = functions.config().telegram.url;
 const TelegramToken = functions.config().telegram.token;
 const TelegramChatID = functions.config().telegram.chatid;
 const expectedToken = TelegramToken.split(":")[1].toLowerCase();
-const sessionDb = admin.database();
 
+// Firebase function
+// This HTTP method is called whenever a user creates or joins a session
 exports.registerTenant = functions.https.onCall(async (data, context) => {
   try {
+    // App check verification, to make sure only the registered domains are calling this API.
     if (context.app == undefined) {
       throw new functions.https.HttpsError(
-          "failed-precondition",
-          "The function must be called from an App Check verified app.");
+        "failed-precondition",
+        "The function must be called from an App Check verified app.");
     }
+    // If the user is trying to join a session
     if (data.requestType === "join") {
       const username = data.username;
       const sessionId = data.sessionId;
-      if (!usernameValidator(username) || !sessionIdValidator(sessionId)) {
-        return ({status: "error", message: "Username or SessionId is not valid!"});
+      if (!usernameValidator(username) || !sessionIdValidator(sessionId)) { // Validate username and session Id
+        return ({ status: "error", message: "Username or SessionId is not valid!" });
       }
-      const snap = await sessionDb.ref(sessionId).once("value");
+      const snap = await sessionDb.ref(sessionId).once("value"); // Retrieve session data from Firebase
       if (!snap.val()) {
-        return ({status: "error", message: "SessionId does not exist!"});
+        return ({ status: "error", message: "SessionId does not exist!" });
       }
       if (!(snap.val()["sessionActivity"]["isValid"])) {
-        return ({status: "error", message: "This session has ended. Please create a new session!"});
+        return ({ status: "error", message: "This session has ended. Please create a new session!" });
       }
       if (!snap.val()["sessionActivity"]["users"][username] && Object.keys(snap.val()["sessionActivity"]["users"]).length >= 8) {
-        return ({status: "error", message: "Session is currently full. Please join another session or create a new one."});
+        return ({ status: "error", message: "Session is currently full. Please join another session or create a new one." });
       }
       const isCreator = snap.val()["sessionInfo"]["creator"] == username;
-      const token = await generateJWTToken(username, sessionId, isCreator);
-      if (!snap.val().sessionActivity.users[username] || !snap.val().sessionActivity.users[username]["isActive"]) {
+      const token = await generateJWTToken(username, sessionId, isCreator); // Generate JWT
+      if (!snap.val().sessionActivity.users[username] || !snap.val().sessionActivity.users[username]["isActive"]) { // If user is not already present in session
         sessionDb.ref(sessionId).update({
           [`sessionActivity/users/${username}/joinedAt`]: new Date().getTime(),
           [`sessionActivity/users/${username}/isActive`]: true,
-          [`sessionActivity/users/${username}/swipes`]: {},
+          [`sessionActivity/users/${username}/swipes`]: {}, // Default swipe state to ensure consistency
         });
       } else {
         sessionDb.ref(sessionId).update({
@@ -46,19 +53,21 @@ exports.registerTenant = functions.https.onCall(async (data, context) => {
           [`sessionActivity/users/${username}/isActive`]: true,
         });
       }
-      return ({status: "success", token: token, isCreator: isCreator});
-    } else if (data.requestType === "create") {
+      return ({ status: "success", token: token, isCreator: isCreator });
+    } else if (data.requestType === "create") {  // If the user is trying to create a new session
       const sessionId = await generateSessionId();
-      const username=data.username;
-      if (!usernameValidator(username)) {
-        return ({status: "error", message: "Username is not valid!"});
+      const username = data.username;
+      if (!usernameValidator(username)) { // Validate username 
+        return ({ status: "error", message: "Username is not valid!" });
       }
-      const categories=data.categories;
-      const languages=data.language;
-      const platform=data.platform;
-      const region=data.region;
-      const type=data.type;
-      const order=data.order;
+      // Parsing data from request
+      const categories = data.categories;
+      const languages = data.language;
+      const platform = data.platform;
+      const region = data.region;
+      const type = data.type;
+      const order = data.order;
+      // Update Database with session
       sessionDb.ref(sessionId).set({
         sessionInfo: {
           categories: categories,
@@ -75,16 +84,16 @@ exports.registerTenant = functions.https.onCall(async (data, context) => {
           isValid: true,
           region: region,
           users:
-      {
-        [username]: {
-          joinedAt: new Date().getTime(),
-          isActive: true,
-        },
-      },
+          {
+            [username]: {
+              joinedAt: new Date().getTime(),
+              isActive: true,
+            },
+          },
         },
       });
-      const token = await generateJWTToken(username, sessionId, true);
-      return ({token: token, sessionId: sessionId, userId: username});
+      const token = await generateJWTToken(username, sessionId, true); // Generate JWT token
+      return ({ token: token, sessionId: sessionId, userId: username });
     } else {
       throw new functions.https.HttpsError("invalid-argument", "The function must be called with correct request type");
     }
@@ -97,13 +106,13 @@ exports.subsequentCards = functions.https.onCall(async (data, context) => {
   try {
     if (context.app == undefined) {
       throw new functions.https.HttpsError(
-          "failed-precondition",
-          "The function must be called from an App Check verified app.");
+        "failed-precondition",
+        "The function must be called from an App Check verified app.");
     }
     const sessionId = context.auth.token.sessionId;
     const snap = await sessionDb.ref(sessionId).once("value");
     if (!snap.val() || !snap.val()["sessionActivity"]["isValid"]) {
-      return ({status: "error", message: "Session has ended. Please create a new session!"});
+      return ({ status: "error", message: "Session has ended. Please create a new session!" });
     }
     const mediaOrder = snap.val()["sessionActivity"]["mediaOrder"];
     const mediaOrderLength = mediaOrder.length;
@@ -131,21 +140,21 @@ exports.subsequentCards = functions.https.onCall(async (data, context) => {
 });
 
 exports.generateInitialData = functions.database.ref("{sessionId}")
-    .onCreate(async (snapshot, context) => {
-      const sessionInfo = snapshot.val().sessionInfo;
-      const sessionId = snapshot.key;
-      const dataSet = await mediaData(sessionInfo, 1);
-      return sessionDb.ref(sessionId).child("sessionActivity").update({
-        mediaOrder: dataSet,
-      });
+  .onCreate(async (snapshot, context) => {
+    const sessionInfo = snapshot.val().sessionInfo;
+    const sessionId = snapshot.key;
+    const dataSet = await mediaData(sessionInfo, 1);
+    return sessionDb.ref(sessionId).child("sessionActivity").update({
+      mediaOrder: dataSet,
     });
+  });
 
 exports.leaveSession = functions.https.onCall(async (data, context) => {
   try {
     if (context.app == undefined) {
       throw new functions.https.HttpsError(
-          "failed-precondition",
-          "The function must be called from an App Check verified app.");
+        "failed-precondition",
+        "The function must be called from an App Check verified app.");
     }
     const userId = context.auth.token.userId;
     const sessionId = context.auth.token.sessionId;
@@ -188,7 +197,7 @@ exports.deploymessages = functions.https.onRequest(async (req, res) => {
     const content = `Deployment: ${title}\nBranch : ${branch}\nStatus: ${status}`;
     try {
       await axios.get(
-          `${TelegramURL}/${TelegramToken}/sendMessage?text=${content}&chat_id=${TelegramChatID}`,
+        `${TelegramURL}/${TelegramToken}/sendMessage?text=${content}&chat_id=${TelegramChatID}`,
       );
       res.status(200).send("Done");
     } catch (error) {
@@ -223,12 +232,12 @@ async function mediaData(sessionInfo, page) {
       sortby = "revenue.desc";
     }
     dataSet = await generateMovieList(
-        languages,
-        categories,
-        platform,
-        region,
-        sortby,
-        page,
+      languages,
+      categories,
+      platform,
+      region,
+      sortby,
+      page,
     );
   } else {
     if (sortby == "Popularity") {
@@ -239,12 +248,12 @@ async function mediaData(sessionInfo, page) {
       sortby = "popularity.desc";
     }
     dataSet = await generateTVList(
-        languages,
-        categories,
-        platform,
-        region,
-        sortby,
-        page,
+      languages,
+      categories,
+      platform,
+      region,
+      sortby,
+      page,
     );
   }
   if (dataSet.length < 20) {
@@ -262,7 +271,7 @@ async function sendErrorNotification(caller, error) {
   try {
     const content = `Error Notification.\n Raised by: ${caller}\n Error: ${error}`;
     await axios.get(
-        `${TelegramURL}/${TelegramToken}/sendMessage?text=${content}&chat_id=${TelegramChatID}`,
+      `${TelegramURL}/${TelegramToken}/sendMessage?text=${content}&chat_id=${TelegramChatID}`,
     );
     functions.logger.error(error);
     return true;
@@ -283,7 +292,7 @@ async function sendErrorNotification(caller, error) {
 async function generateMovieList(lang, genres, platform, region, sort, page) {
   const url = `https://api.themoviedb.org/3/discover/movie?api_key=${apiToken}`;
   const resp = await axios.get(
-      `${url}&with_original_language=${lang}&with_genres=${genres}&sort_by=${sort}&with_watch_providers=${platform}&watch_region=${region}&page=${page}`,
+    `${url}&with_original_language=${lang}&with_genres=${genres}&sort_by=${sort}&with_watch_providers=${platform}&watch_region=${region}&page=${page}`,
   );
   const data = resp.data.results;
   const res = [];
@@ -300,16 +309,16 @@ async function generateMovieList(lang, genres, platform, region, sort, page) {
       for (let i = 0; i < oldGenre.length; i++) {
         newGenre.push(oldGenre[i].id);
       }
-      newData["genre_ids"]= newGenre;
+      newData["genre_ids"] = newGenre;
       const allVideos = newData.videos.results;
       let videoUrl = "";
       for (let i = 0; i < allVideos.length; i++) {
-        if (allVideos[i].official==true && allVideos[i].site=="YouTube" && allVideos[i].type=="Trailer") {
+        if (allVideos[i].official == true && allVideos[i].site == "YouTube" && allVideos[i].type == "Trailer") {
           videoUrl = `https://www.youtube.com/watch?v=${allVideos[i].key}`;
         }
       }
       newData["trailerURL"] = videoUrl;
-      const allProviders= newData["watch/providers"].results;
+      const allProviders = newData["watch/providers"].results;
       const providers = {};
       for (const i of Object.keys(allProviders)) {
         providers[i] = {};
@@ -348,10 +357,10 @@ async function generateMovieList(lang, genres, platform, region, sort, page) {
       delete newData.popularity;
       delete newData.videos;
       await admin
-          .firestore()
-          .collection("media")
-          .doc(id)
-          .set(newData);
+        .firestore()
+        .collection("media")
+        .doc(id)
+        .set(newData);
     }
     res.push(id);
   }
@@ -369,7 +378,7 @@ async function generateMovieList(lang, genres, platform, region, sort, page) {
 async function generateTVList(lang, genres, platform, region, sort, page) {
   const url = `https://api.themoviedb.org/3/discover/tv?api_key=${apiToken}`;
   const resp = await axios.get(
-      `${url}&with_original_language=${lang}&with_genres=${genres}&sort_by=${sort}&with_ott_providers=${platform}&ott_region=${region}&page=${page}`,
+    `${url}&with_original_language=${lang}&with_genres=${genres}&sort_by=${sort}&with_ott_providers=${platform}&ott_region=${region}&page=${page}`,
   );
   const data = resp.data.results;
   const res = [];
@@ -379,14 +388,14 @@ async function generateTVList(lang, genres, platform, region, sort, page) {
     const doc = await sessionDb.get();
     data[i]["title"] = data[i]["name"];
     data[i]["poster_path"] =
-    "https://image.tmdb.org/t/p/original" + data[i]["poster_path"];
+      "https://image.tmdb.org/t/p/original" + data[i]["poster_path"];
     data[i]["release_date"] = data[i]["first_air_date"];
     if (!doc.exists) {
       await admin
-          .firestore()
-          .collection("media")
-          .doc(id)
-          .set(data[i]);
+        .firestore()
+        .collection("media")
+        .doc(id)
+        .set(data[i]);
     }
     res.push(id);
   }
@@ -465,9 +474,9 @@ function usernameValidator(username) {
   }
   if (
     !username
-        .toLowerCase()
-        .split("")
-        .every((char) => alphaNumeric.includes(char))
+      .toLowerCase()
+      .split("")
+      .every((char) => alphaNumeric.includes(char))
   ) {
     return false;
   }
@@ -487,9 +496,9 @@ function sessionIdValidator(sessionId) {
   }
   if (
     !sessionId
-        .toLowerCase()
-        .split("")
-        .every((char) => alphaNumeric.includes(char))
+      .toLowerCase()
+      .split("")
+      .every((char) => alphaNumeric.includes(char))
   ) {
     return false;
   }
