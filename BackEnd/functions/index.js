@@ -12,8 +12,10 @@ const TelegramToken = functions.config().telegram.token;
 const TelegramChatID = functions.config().telegram.chatid;
 const expectedToken = TelegramToken.split(":")[1].toLowerCase();
 
-// Firebase function
-// This HTTP method is called whenever a user creates or joins a session
+/* 
+ - Firebase function
+ - This HTTP method is called whenever a user creates or joins a session
+*/
 exports.registerTenant = functions.https.onCall(async (data, context) => {
   try {
     // App check verification, to make sure only the registered domains are calling this API.
@@ -102,43 +104,53 @@ exports.registerTenant = functions.https.onCall(async (data, context) => {
   }
 });
 
+/* 
+  - Firebase function
+  - This HTTP method is called whenever a user requests for additional cards
+*/
 exports.subsequentCards = functions.https.onCall(async (data, context) => {
   try {
+    // App check verification, to make sure only the registered domains are calling this API.
     if (context.app == undefined) {
       throw new functions.https.HttpsError(
         "failed-precondition",
         "The function must be called from an App Check verified app.");
     }
-    const sessionId = context.auth.token.sessionId;
+    const sessionId = context.auth.token.sessionId;   // retrieving sessionId
     const snap = await sessionDb.ref(sessionId).once("value");
     if (!snap.val() || !snap.val()["sessionActivity"]["isValid"]) {
       return ({ status: "error", message: "Session has ended. Please create a new session!" });
     }
     const mediaOrder = snap.val()["sessionActivity"]["mediaOrder"];
     const mediaOrderLength = mediaOrder.length;
-    if (mediaOrderLength >= 300) {
+    if (mediaOrderLength >= 300) {     // load no more than 300 movie cards for one session
       if (!(mediaOrder.includes("null"))) {
-        mediaOrder.push("null");
+        mediaOrder.push("null");    // if no movie card has a null reference, we add one movie card with value null
       }
-    } else if (!(mediaOrder.includes("null"))) {
+    } else if (!(mediaOrder.includes("null"))) {  // no null card yet
       const page = getPageNumber(mediaOrderLength);
       const sessionInfo = snap.val()["sessionInfo"];
       const newData = await mediaData(sessionInfo, page);
       for (const mediaId of newData) {
-        if (!(mediaOrder.includes(mediaId))) {
+        if (!(mediaOrder.includes(mediaId))) {   // append new data to media order, checking if the mediaId already exists
           mediaOrder.push(mediaId);
         }
       }
     }
     sessionDb.ref(sessionId).update({
-      "sessionActivity/mediaOrder": mediaOrder,
+      "sessionActivity/mediaOrder": mediaOrder,   // update the rtdb with the new media order
     });
     return;
   } catch (err) {
-    sendErrorNotification("Register Tenant", err);
+    sendErrorNotification("Register Tenant", err);   // SEV alert notification if the function fails
   }
 });
 
+/* 
+ - Firebase cloud function to trigger the database
+ - This function takes the key as sessionId and the sessionInfo as child value, and generates mediaData corresponding to session
+ - info which further updates the sessionDb for that sessionId
+*/
 exports.generateInitialData = functions.database.ref("{sessionId}")
   .onCreate(async (snapshot, context) => {
     const sessionInfo = snapshot.val().sessionInfo;
@@ -149,8 +161,13 @@ exports.generateInitialData = functions.database.ref("{sessionId}")
     });
   });
 
+/* 
+ - Firebase function
+ - This HTTP method is called whenever a user leaves a session
+ */
 exports.leaveSession = functions.https.onCall(async (data, context) => {
   try {
+    // App check verification, to make sure only the registered domains are calling this API.
     if (context.app == undefined) {
       throw new functions.https.HttpsError(
         "failed-precondition",
@@ -159,19 +176,25 @@ exports.leaveSession = functions.https.onCall(async (data, context) => {
     const userId = context.auth.token.userId;
     const sessionId = context.auth.token.sessionId;
     const isCreator = context.auth.token.isCreator;
+    // if the session is ended by creator, the session validity becomes false which is updated in databse, and correspondingly
+    // other users who might still be in the session are kicked out of the session (session ends)
     if (isCreator) {
       sessionDb.ref(sessionId).child("sessionActivity").update({
         isValid: false,
       });
-    } else {
+    }
+    // if the session is ended by anybody other than creator, the users activity becomes false and the session ends for him.
+    // session does not end
+    else {
       sessionDb.ref(sessionId).child("sessionActivity").child("users").child(userId).update({
         isActive: false,
       });
     }
+    // user deleted from firebase auth
     await admin.auth().deleteUser(`${sessionId}|${userId}|${isCreator}`);
     return;
   } catch (err) {
-    sendErrorNotification("Leave Session", err);
+    sendErrorNotification("Leave Session", err);   // SEV alert notification if the function fails
   }
 });
 
@@ -216,6 +239,7 @@ exports.deploymessages = functions.https.onRequest(async (req, res) => {
  * @param  {number} page
  */
 async function mediaData(sessionInfo, page) {
+  // Retrieves the parameters that the creator chose for the session
   const categories = sessionInfo.categories;
   const languages = sessionInfo.languages;
   const platform = sessionInfo.platform;
@@ -223,6 +247,7 @@ async function mediaData(sessionInfo, page) {
   let sortby = sessionInfo.order;
   const movie = sessionInfo.isMovie;
   let dataSet = [];
+  // If the content type is Movie
   if (movie === true) {
     if (sortby == "Popularity") {
       sortby = "popularity.desc";
@@ -231,6 +256,7 @@ async function mediaData(sessionInfo, page) {
     } else if (sortby == "Revenue") {
       sortby = "revenue.desc";
     }
+    // A dataSet for movies is generated based upon the parameters
     dataSet = await generateMovieList(
       languages,
       categories,
@@ -239,7 +265,9 @@ async function mediaData(sessionInfo, page) {
       sortby,
       page,
     );
-  } else {
+  }
+  // If the content type is TV
+  else {
     if (sortby == "Popularity") {
       sortby = "popularity.desc";
     } else if (sortby == "Release") {
@@ -256,6 +284,7 @@ async function mediaData(sessionInfo, page) {
       page,
     );
   }
+  // If the dataSet populated contains less than 20 movies, then a null card is added depicting the end
   if (dataSet.length < 20) {
     dataSet.push("null");
   }
@@ -290,14 +319,18 @@ async function sendErrorNotification(caller, error) {
  * @param  {number} page
  */
 async function generateMovieList(lang, genres, platform, region, sort, page) {
+  // API call to TMDB to generate movie list
   const url = `https://api.themoviedb.org/3/discover/movie?api_key=${apiToken}`;
+  // An axios call to get the data
   const resp = await axios.get(
     `${url}&with_original_language=${lang}&with_genres=${genres}&sort_by=${sort}&with_watch_providers=${platform}&watch_region=${region}&page=${page}`,
   );
+  // parsing on the data and storing the media and movie data in firestore
   const data = resp.data.results;
   const res = [];
   for (let i = 0; i < data.length; i++) {
     const id = data[i].id.toString();
+    // media content is stored in firestore
     const sessionDb = admin.firestore().collection("media").doc(id);
     const doc = await sessionDb.get();
     if (!doc.exists) {
@@ -376,7 +409,9 @@ async function generateMovieList(lang, genres, platform, region, sort, page) {
  * @param  {number} page
  */
 async function generateTVList(lang, genres, platform, region, sort, page) {
+  // API call to TMDB to generate TV list
   const url = `https://api.themoviedb.org/3/discover/tv?api_key=${apiToken}`;
+  // An axios call to get the data
   const resp = await axios.get(
     `${url}&with_original_language=${lang}&with_genres=${genres}&sort_by=${sort}&with_ott_providers=${platform}&ott_region=${region}&page=${page}`,
   );
@@ -384,7 +419,7 @@ async function generateTVList(lang, genres, platform, region, sort, page) {
   const res = [];
   for (let i = 0; i < data.length; i++) {
     const id = data[i].id.toString();
-    const sessionDb = admin.firestore().collection("media").doc(id);
+    const sessionDb = admin.firestore().collection("media").doc(id);   // content data collected and stored inside firestore
     const doc = await sessionDb.get();
     data[i]["title"] = data[i]["name"];
     data[i]["poster_path"] =
@@ -405,10 +440,10 @@ async function generateTVList(lang, genres, platform, region, sort, page) {
 /**
  */
 async function generateSessionId() {
-  let id = randomSessionCode();
+  let id = randomSessionCode();   // random session Id generated on this function call
   const validId = true;
   while (validId) {
-    const snap = await sessionDb.ref(id).once("value");
+    const snap = await sessionDb.ref(id).once("value");   // a snapshot of the rtdb with this id
     if (!snap.val()) {
       return id;
     } else {
@@ -421,7 +456,7 @@ async function generateSessionId() {
  * @return {string} A random 6 digit code
  */
 function randomSessionCode() {
-  const length = 6;
+  const length = 6;   // session Id is a string of length 6
   const chars = "123456789ABCDEFGHJKMNPQRSTUVWXYZ";
   let result = "";
   for (let i = length; i > 0; --i) {
@@ -451,11 +486,14 @@ function getPageNumber(numberOfCards) {
  * @param  {Boolean} isCreator
 */
 async function generateJWTToken(userId, sessionId, isCreator = false) {
+  // A JWT token is genereated for each user that registers into the session.
+  // For Authentication and security purposes, cannot spoof data other than the one he/she is authenticated for
   const additionalClaims = {
     isCreator: isCreator,
     sessionId: sessionId,
     userId: userId,
   };
+  // firebase function to generate custom JWT token with the following format
   const customToken = await admin.auth().createCustomToken(`${sessionId}|${userId}|${isCreator}`, additionalClaims);
   return customToken;
 }
@@ -465,7 +503,7 @@ async function generateJWTToken(userId, sessionId, isCreator = false) {
  * @param  {string} username
  * @return {boolean} if valid or not
  */
-function usernameValidator(username) {
+function usernameValidator(username) {            // data username validation added for the backend
   if (username == null || username.length == 0) {
     return false;
   }
@@ -487,7 +525,7 @@ function usernameValidator(username) {
  * @param  {string} sessionId
  * @return {boolean} if valid or not
  */
-function sessionIdValidator(sessionId) {
+function sessionIdValidator(sessionId) {            // data sessionId validation added for the backend
   if (sessionId == null || sessionId.length != 6) {
     return false;
   }
